@@ -12,7 +12,7 @@ set(files
   fmaintrin.h
   immintrin.h
   iso646.h
-  limits.h
+  #limits.h
   lzcntintrin.h
   mm3dnow.h
   mmintrin.h
@@ -24,12 +24,12 @@ set(files
   rdseedintrin.h
   rtmintrin.h
   smmintrin.h
-  stdalign.h
-  stdarg.h
-  stdbool.h
-  stddef.h
-  stdint.h
-  stdnoreturn.h
+  #stdalign.h
+  #stdarg.h
+  #stdbool.h
+  #stddef.h
+  #stdint.h
+  #stdnoreturn.h
   tgmath.h
   tmmintrin.h
   varargs.h
