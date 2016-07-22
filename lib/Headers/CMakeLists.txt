@@ -41,7 +41,7 @@ set(files
   intrin.h
   inttypes.h
   iso646.h
-  limits.h
+  #limits.h
   lzcntintrin.h
   mm3dnow.h
   mmintrin.h
@@ -59,14 +59,14 @@ set(files
   s390intrin.h
   shaintrin.h
   smmintrin.h
-  stdalign.h
-  stdarg.h
-  stdatomic.h
-  stdbool.h
-  stddef.h
-  __stddef_max_align_t.h
-  stdint.h
-  stdnoreturn.h
+  #stdalign.h
+  #stdarg.h
+  #stdatomic.h
+  #stdbool.h
+  #stddef.h
+  #__stddef_max_align_t.h
+  #stdint.h
+  #stdnoreturn.h
   tbmintrin.h
   tgmath.h
   tmmintrin.h
