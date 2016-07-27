@@ -3609,7 +3609,7 @@ static void addPGOAndCoverageFlags(Compilation &C, const Driver &D,
     if (PGOGenerateArg->getOption().matches(
             options::OPT_fprofile_generate_EQ)) {
       SmallString<128> Path(PGOGenerateArg->getValue());
-      llvm::sys::path::append(Path, "default.profraw");
+      llvm::sys::path::append(Path, "default_%m.profraw");
       CmdArgs.push_back(
           Args.MakeArgString(Twine("-fprofile-instrument-path=") + Path));
     }
@@ -5443,6 +5443,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   }
 
   Args.AddLastArg(CmdArgs, options::OPT_fmodules_validate_system_headers);
+  Args.AddLastArg(CmdArgs, options::OPT_fmodules_disable_diagnostic_validation);
 
   // -faccess-control is default.
   if (Args.hasFlag(options::OPT_fno_access_control,
