@@ -24,9 +24,7 @@ bool IndexingContext::shouldIndexFunctionLocalSymbols() const {
 bool IndexingContext::handleDecl(const Decl *D,
                                  SymbolRoleSet Roles,
                                  ArrayRef<SymbolRelation> Relations) {
-  return handleDeclOccurrence(D, D->getLocation(), /*IsRef=*/false,
-                              cast<Decl>(D->getDeclContext()), Roles, Relations,
-                              nullptr, nullptr, D->getDeclContext());
+  return handleDecl(D, D->getLocation(), Roles, Relations);
 }
 
 bool IndexingContext::handleDecl(const Decl *D, SourceLocation Loc,
@@ -35,9 +33,14 @@ bool IndexingContext::handleDecl(const Decl *D, SourceLocation Loc,
                                  const DeclContext *DC) {
   if (!DC)
     DC = D->getDeclContext();
+
+  const Decl *OrigD = D;
+  if (isa<ObjCPropertyImplDecl>(D)) {
+    D = cast<ObjCPropertyImplDecl>(D)->getPropertyDecl();
+  }
   return handleDeclOccurrence(D, Loc, /*IsRef=*/false, cast<Decl>(DC),
                               Roles, Relations,
-                              nullptr, nullptr, DC);
+                              nullptr, OrigD, DC);
 }
 
 bool IndexingContext::handleReference(const NamedDecl *D, SourceLocation Loc,
@@ -130,9 +133,10 @@ bool IndexingContext::isTemplateImplicitInstantiation(const Decl *D) {
   if (const ClassTemplateSpecializationDecl *
       SD = dyn_cast<ClassTemplateSpecializationDecl>(D)) {
     TKind = SD->getSpecializationKind();
-  }
-  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+  } else if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
     TKind = FD->getTemplateSpecializationKind();
+  } else if (auto *VD = dyn_cast<VarDecl>(D)) {
+    TKind = VD->getTemplateSpecializationKind();
   }
   switch (TKind) {
     case TSK_Undeclared:
@@ -164,9 +168,10 @@ static const Decl *adjustTemplateImplicitInstantiation(const Decl *D) {
   if (const ClassTemplateSpecializationDecl *
       SD = dyn_cast<ClassTemplateSpecializationDecl>(D)) {
     return SD->getTemplateInstantiationPattern();
-  }
-  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+  } else if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
     return FD->getTemplateInstantiationPattern();
+  } else if (auto *VD = dyn_cast<VarDecl>(D)) {
+    return VD->getTemplateInstantiationPattern();
   }
   return nullptr;
 }
@@ -284,7 +289,7 @@ bool IndexingContext::handleDeclOccurrence(const Decl *D, SourceLocation Loc,
 
   if (IsRef)
     Roles |= (unsigned)SymbolRole::Reference;
-  else if (isDeclADefinition(D, ContainerDC, *Ctx))
+  else if (isDeclADefinition(OrigD, ContainerDC, *Ctx))
     Roles |= (unsigned)SymbolRole::Definition;
   else
     Roles |= (unsigned)SymbolRole::Declaration;
@@ -310,9 +315,20 @@ bool IndexingContext::handleDeclOccurrence(const Decl *D, SourceLocation Loc,
     Roles |= Rel.Roles;
   };
 
-  if (!IsRef && Parent && !cast<DeclContext>(Parent)->isFunctionOrMethod()) {
-    addRelation(SymbolRelation{(unsigned)SymbolRole::RelationChildOf, Parent});
+  if (Parent) {
+    if (IsRef) {
+      addRelation(SymbolRelation{
+        (unsigned)SymbolRole::RelationContainedBy,
+        Parent
+      });
+    } else if (!cast<DeclContext>(Parent)->isFunctionOrMethod()) {
+      addRelation(SymbolRelation{
+        (unsigned)SymbolRole::RelationChildOf,
+        Parent
+      });
+    }
   }
+
   for (auto &Rel : Relations) {
     addRelation(SymbolRelation(Rel.Roles,
                                Rel.RelatedSymbol->getCanonicalDecl()));

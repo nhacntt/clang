@@ -885,6 +885,7 @@ enum AttributeDeclKind {
   ExpectedFunction,
   ExpectedUnion,
   ExpectedVariableOrFunction,
+  ExpectedFunctionOrGlobalVar,
   ExpectedFunctionVariableOrObjCInterface,
   ExpectedFunctionOrMethod,
   ExpectedParameter,
@@ -924,7 +925,8 @@ enum AttributeDeclKind {
   ExpectedVariableEnumFieldOrTypedef,
   ExpectedFunctionMethodEnumOrClass,
   ExpectedStructClassVariableFunctionOrInlineNamespace,
-  ExpectedForMaybeUnused
+  ExpectedForMaybeUnused,
+  ExpectedEnumOrClass,
 };
 
 }  // end namespace clang

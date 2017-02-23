@@ -189,6 +189,7 @@ bool TypePrinter::canPrefixQualifiers(const Type *T,
     case Type::Elaborated:
     case Type::TemplateTypeParm:
     case Type::SubstTemplateTypeParmPack:
+    case Type::DeducedTemplateSpecialization:
     case Type::TemplateSpecialization:
     case Type::InjectedClassName:
     case Type::DependentName:
@@ -888,6 +889,24 @@ void TypePrinter::printAutoAfter(const AutoType *T, raw_ostream &OS) {
     printAfter(T->getDeducedType(), OS);
 }
 
+void TypePrinter::printDeducedTemplateSpecializationBefore(
+    const DeducedTemplateSpecializationType *T, raw_ostream &OS) {
+  // If the type has been deduced, print the deduced type.
+  if (!T->getDeducedType().isNull()) {
+    printBefore(T->getDeducedType(), OS);
+  } else {
+    IncludeStrongLifetimeRAII Strong(Policy);
+    T->getTemplateName().print(OS, Policy);
+    spaceBeforePlaceHolder(OS);
+  }
+}
+void TypePrinter::printDeducedTemplateSpecializationAfter(
+    const DeducedTemplateSpecializationType *T, raw_ostream &OS) {
+  // If the type has been deduced, print the deduced type.
+  if (!T->getDeducedType().isNull())
+    printAfter(T->getDeducedType(), OS);
+}
+
 void TypePrinter::printAtomicBefore(const AtomicType *T, raw_ostream &OS) {
   IncludeStrongLifetimeRAII Strong(Policy);
 
@@ -901,6 +920,10 @@ void TypePrinter::printAtomicAfter(const AtomicType *T, raw_ostream &OS) { }
 void TypePrinter::printPipeBefore(const PipeType *T, raw_ostream &OS) {
   IncludeStrongLifetimeRAII Strong(Policy);
 
+  if (T->isReadOnly())
+    OS << "read_only ";
+  else
+    OS << "write_only ";
   OS << "pipe ";
   print(T->getElementType(), OS, StringRef());
   spaceBeforePlaceHolder(OS);

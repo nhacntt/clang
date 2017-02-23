@@ -517,6 +517,8 @@ namespace  {
     void VisitFloatingLiteral(const FloatingLiteral *Node);
     void VisitStringLiteral(const StringLiteral *Str);
     void VisitInitListExpr(const InitListExpr *ILE);
+    void VisitArrayInitLoopExpr(const ArrayInitLoopExpr *ILE);
+    void VisitArrayInitIndexExpr(const ArrayInitIndexExpr *ILE);
     void VisitUnaryOperator(const UnaryOperator *Node);
     void VisitUnaryExprOrTypeTraitExpr(const UnaryExprOrTypeTraitExpr *Node);
     void VisitMemberExpr(const MemberExpr *Node);
@@ -545,6 +547,8 @@ namespace  {
       dumpDecl(Node->getLambdaClass());
     }
     void VisitSizeOfPackExpr(const SizeOfPackExpr *Node);
+    void
+    VisitCXXDependentScopeMemberExpr(const CXXDependentScopeMemberExpr *Node);
 
     // ObjC
     void VisitObjCAtCatchStmt(const ObjCAtCatchStmt *Node);
@@ -1135,8 +1139,15 @@ void ASTDumper::VisitFunctionDecl(const FunctionDecl *D) {
 
   if (D->isPure())
     OS << " pure";
-  else if (D->isDeletedAsWritten())
+  if (D->isDefaulted()) {
+    OS << " default";
+    if (D->isDeleted())
+      OS << "_delete";
+  }
+  if (D->isDeletedAsWritten())
     OS << " delete";
+  if (D->isTrivial())
+    OS << " trivial";
 
   if (const FunctionProtoType *FPT = D->getType()->getAs<FunctionProtoType>()) {
     FunctionProtoType::ExtProtoInfo EPI = FPT->getExtProtoInfo();
@@ -1154,11 +1165,6 @@ void ASTDumper::VisitFunctionDecl(const FunctionDecl *D) {
   if (const FunctionTemplateSpecializationInfo *FTSI =
           D->getTemplateSpecializationInfo())
     dumpTemplateArgumentList(*FTSI->TemplateArguments);
-
-  for (ArrayRef<NamedDecl *>::iterator
-       I = D->getDeclsInPrototypeScope().begin(),
-       E = D->getDeclsInPrototypeScope().end(); I != E; ++I)
-    dumpDecl(*I);
 
   if (!D->param_begin() && D->getNumParams())
     dumpChild([=] { OS << "<<NULL params x " << D->getNumParams() << ">>"; });
@@ -1457,6 +1463,7 @@ void ASTDumper::VisitTemplateTypeParmDecl(const TemplateTypeParmDecl *D) {
     OS << " typename";
   else
     OS << " class";
+  OS << " depth " << D->getDepth() << " index " << D->getIndex();
   if (D->isParameterPack())
     OS << " ...";
   dumpName(D);
@@ -1466,6 +1473,7 @@ void ASTDumper::VisitTemplateTypeParmDecl(const TemplateTypeParmDecl *D) {
 
 void ASTDumper::VisitNonTypeTemplateParmDecl(const NonTypeTemplateParmDecl *D) {
   dumpType(D->getType());
+  OS << " depth " << D->getDepth() << " index " << D->getIndex();
   if (D->isParameterPack())
     OS << " ...";
   dumpName(D);
@@ -1475,6 +1483,7 @@ void ASTDumper::VisitNonTypeTemplateParmDecl(const NonTypeTemplateParmDecl *D) {
 
 void ASTDumper::VisitTemplateTemplateParmDecl(
     const TemplateTemplateParmDecl *D) {
+  OS << " depth " << D->getDepth() << " index " << D->getIndex();
   if (D->isParameterPack())
     OS << " ...";
   dumpName(D);
@@ -2020,6 +2029,14 @@ void ASTDumper::VisitInitListExpr(const InitListExpr *ILE) {
   }
 }
 
+void ASTDumper::VisitArrayInitLoopExpr(const ArrayInitLoopExpr *E) {
+  VisitExpr(E);
+}
+
+void ASTDumper::VisitArrayInitIndexExpr(const ArrayInitIndexExpr *E) {
+  VisitExpr(E);
+}
+
 void ASTDumper::VisitUnaryOperator(const UnaryOperator *Node) {
   VisitExpr(Node);
   OS << " " << (Node->isPostfix() ? "postfix" : "prefix")
@@ -2194,6 +2211,11 @@ void ASTDumper::VisitSizeOfPackExpr(const SizeOfPackExpr *Node) {
       dumpTemplateArgument(A);
 }
 
+void ASTDumper::VisitCXXDependentScopeMemberExpr(
+    const CXXDependentScopeMemberExpr *Node) {
+  VisitExpr(Node);
+  OS << " " << (Node->isArrow() ? "->" : ".") << Node->getMember();
+}
 
 //===----------------------------------------------------------------------===//
 // Obj-C Expressions

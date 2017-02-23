@@ -245,11 +245,8 @@ GlobalModuleIndex::readIndex(StringRef Path) {
     return std::make_pair(nullptr, EC_NotFound);
   std::unique_ptr<llvm::MemoryBuffer> Buffer = std::move(BufferOrErr.get());
 
-  /// \brief The bitstream reader from which we'll read the AST file.
-  llvm::BitstreamReader Reader(*Buffer);
-
   /// \brief The main bitstream cursor for the main block.
-  llvm::BitstreamCursor Cursor(Reader);
+  llvm::BitstreamCursor Cursor(*Buffer);
 
   // Sniff for the signature.
   if (Cursor.Read(8) != 'B' ||
@@ -503,9 +500,7 @@ bool GlobalModuleIndexBuilder::loadModuleFile(const FileEntry *File) {
   }
 
   // Initialize the input stream
-  llvm::BitstreamReader InStreamFile;
-  PCHContainerRdr.ExtractPCH((*Buffer)->getMemBufferRef(), InStreamFile);
-  llvm::BitstreamCursor InStream(InStreamFile);
+  llvm::BitstreamCursor InStream(PCHContainerRdr.ExtractPCH(**Buffer));
 
   // Sniff for the signature.
   if (InStream.Read(8) != 'C' ||
@@ -749,11 +744,11 @@ void GlobalModuleIndexBuilder::writeIndex(llvm::BitstreamWriter &Stream) {
     }
 
     // Create a blob abbreviation
-    BitCodeAbbrev *Abbrev = new BitCodeAbbrev();
+    auto Abbrev = std::make_shared<BitCodeAbbrev>();
     Abbrev->Add(BitCodeAbbrevOp(IDENTIFIER_INDEX));
     Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 32));
     Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob));
-    unsigned IDTableAbbrev = Stream.EmitAbbrev(Abbrev);
+    unsigned IDTableAbbrev = Stream.EmitAbbrev(std::move(Abbrev));
 
     // Write the identifier table
     uint64_t Record[] = {IDENTIFIER_INDEX, BucketOffset};

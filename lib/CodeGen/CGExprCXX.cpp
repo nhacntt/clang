@@ -35,17 +35,6 @@ commonEmitCXXMemberOrOperatorCall(CodeGenFunction &CGF, const CXXMethodDecl *MD,
          "Trying to emit a member or operator call expr on a static method!");
   ASTContext &C = CGF.getContext();
 
-  // C++11 [class.mfct.non-static]p2:
-  //   If a non-static member function of a class X is called for an object that
-  //   is not of type X, or of a type derived from X, the behavior is undefined.
-  SourceLocation CallLoc;
-  if (CE)
-    CallLoc = CE->getExprLoc();
-  CGF.EmitTypeCheck(isa<CXXConstructorDecl>(MD)
-                        ? CodeGenFunction::TCK_ConstructorCall
-                        : CodeGenFunction::TCK_MemberCall,
-                    CallLoc, This, C.getRecordType(MD->getParent()));
-
   // Push the this ptr.
   const CXXRecordDecl *RD =
       CGF.CGM.getCXXABI().getThisArgumentTypeForMethod(MD);
@@ -292,6 +281,24 @@ RValue CodeGenFunction::EmitCXXMemberOrOperatorMemberCallExpr(
     FInfo = &CGM.getTypes().arrangeCXXMethodDeclaration(CalleeDecl);
 
   llvm::FunctionType *Ty = CGM.getTypes().GetFunctionType(*FInfo);
+
+  // C++11 [class.mfct.non-static]p2:
+  //   If a non-static member function of a class X is called for an object that
+  //   is not of type X, or of a type derived from X, the behavior is undefined.
+  SourceLocation CallLoc;
+  ASTContext &C = getContext();
+  if (CE)
+    CallLoc = CE->getExprLoc();
+
+  SanitizerSet SkippedChecks;
+  if (const auto *CMCE = dyn_cast<CXXMemberCallExpr>(CE))
+    if (IsDeclRefOrWrappedCXXThis(CMCE->getImplicitObjectArgument()))
+      SkippedChecks.set(SanitizerKind::Null, true);
+  EmitTypeCheck(
+      isa<CXXConstructorDecl>(CalleeDecl) ? CodeGenFunction::TCK_ConstructorCall
+                                          : CodeGenFunction::TCK_MemberCall,
+      CallLoc, This.getPointer(), C.getRecordType(CalleeDecl->getParent()),
+      /*Alignment=*/CharUnits::Zero(), SkippedChecks);
 
   // FIXME: Uses of 'MD' past this point need to be audited. We may need to use
   // 'CalleeDecl' instead.
@@ -657,7 +664,10 @@ static llvm::Value *EmitCXXNewAllocSize(CodeGenFunction &CGF,
   // Emit the array size expression.
   // We multiply the size of all dimensions for NumElements.
   // e.g for 'int[2][3]', ElemType is 'int' and NumElements is 6.
-  numElements = CGF.EmitScalarExpr(e->getArraySize());
+  numElements = CGF.CGM.EmitConstantExpr(e->getArraySize(),
+                                         CGF.getContext().getSizeType(), &CGF);
+  if (!numElements)
+    numElements = CGF.EmitScalarExpr(e->getArraySize());
   assert(isa<llvm::IntegerType>(numElements->getType()));
 
   // The number of elements can be have an arbitrary integer type;
@@ -1763,6 +1773,15 @@ static void EmitObjectDelete(CodeGenFunction &CGF,
                              const CXXDeleteExpr *DE,
                              Address Ptr,
                              QualType ElementType) {
+  // C++11 [expr.delete]p3:
+  //   If the static type of the object to be deleted is different from its
+  //   dynamic type, the static type shall be a base class of the dynamic type
+  //   of the object to be deleted and the static type shall have a virtual
+  //   destructor or the behavior is undefined.
+  CGF.EmitTypeCheck(CodeGenFunction::TCK_MemberCall,
+                    DE->getExprLoc(), Ptr.getPointer(),
+                    ElementType);
+
   // Find the destructor for the type, if applicable.  If the
   // destructor is virtual, we'll just emit the vcall and return.
   const CXXDestructorDecl *Dtor = nullptr;
@@ -2129,10 +2148,7 @@ void CodeGenFunction::EmitLambdaExpr(const LambdaExpr *E, AggValueSlot Slot) {
       auto VAT = CurField->getCapturedVLAType();
       EmitStoreThroughLValue(RValue::get(VLASizeMap[VAT->getSizeExpr()]), LV);
     } else {
-      ArrayRef<VarDecl *> ArrayIndexes;
-      if (CurField->getType()->isArrayType())
-        ArrayIndexes = E->getCaptureInitIndexVars(i);
-      EmitInitializerForField(*CurField, LV, *i, ArrayIndexes);
+      EmitInitializerForField(*CurField, LV, *i);
     }
   }
 }
