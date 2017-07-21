@@ -350,7 +350,8 @@ namespace {
       MostDerivedArraySize = 2;
       MostDerivedPathLength = Entries.size();
     }
-    void diagnosePointerArithmetic(EvalInfo &Info, const Expr *E, APSInt N);
+    void diagnosePointerArithmetic(EvalInfo &Info, const Expr *E,
+                                   const APSInt &N);
     /// Add N to the address of this subobject.
     void adjustIndex(EvalInfo &Info, const Expr *E, APSInt N) {
       if (Invalid || !N) return;
@@ -735,6 +736,7 @@ namespace {
             if (!HasFoldFailureDiagnostic)
               break;
             // We've already failed to fold something. Keep that diagnostic.
+            LLVM_FALLTHROUGH;
           case EM_ConstantExpression:
           case EM_PotentialConstantExpression:
           case EM_ConstantExpressionUnevaluated:
@@ -1071,7 +1073,8 @@ bool SubobjectDesignator::checkSubobject(EvalInfo &Info, const Expr *E,
 }
 
 void SubobjectDesignator::diagnosePointerArithmetic(EvalInfo &Info,
-                                                    const Expr *E, APSInt N) {
+                                                    const Expr *E,
+                                                    const APSInt &N) {
   // If we're complaining, we must be able to statically determine the size of
   // the most derived array.
   if (MostDerivedPathLength == Entries.size() && MostDerivedIsArrayElement)
@@ -1228,8 +1231,7 @@ namespace {
       IsNullPtr = V.isNullPointer();
     }
 
-    void set(APValue::LValueBase B, unsigned I = 0, bool BInvalid = false,
-             bool IsNullPtr_ = false, uint64_t Offset_ = 0) {
+    void set(APValue::LValueBase B, unsigned I = 0, bool BInvalid = false) {
 #ifndef NDEBUG
       // We only allow a few types of invalid bases. Enforce that here.
       if (BInvalid) {
@@ -1240,11 +1242,20 @@ namespace {
 #endif
 
       Base = B;
-      Offset = CharUnits::fromQuantity(Offset_);
+      Offset = CharUnits::fromQuantity(0);
       InvalidBase = BInvalid;
       CallIndex = I;
       Designator = SubobjectDesignator(getType(B));
-      IsNullPtr = IsNullPtr_;
+      IsNullPtr = false;
+    }
+
+    void setNull(QualType PointerTy, uint64_t TargetVal) {
+      Base = (Expr *)nullptr;
+      Offset = CharUnits::fromQuantity(TargetVal);
+      InvalidBase = false;
+      CallIndex = 0;
+      Designator = SubobjectDesignator(PointerTy->getPointeeType());
+      IsNullPtr = true;
     }
 
     void setInvalid(APValue::LValueBase B, unsigned I = 0) {
@@ -1296,8 +1307,8 @@ namespace {
     void clearIsNullPointer() {
       IsNullPtr = false;
     }
-    void adjustOffsetAndIndex(EvalInfo &Info, const Expr *E, APSInt Index,
-                              CharUnits ElementSize) {
+    void adjustOffsetAndIndex(EvalInfo &Info, const Expr *E,
+                              const APSInt &Index, CharUnits ElementSize) {
       // An index of 0 has no effect. (In C, adding 0 to a null pointer is UB,
       // but we're not required to diagnose it and it's valid in C++.)
       if (!Index)
@@ -1654,6 +1665,19 @@ static bool CheckLValueConstantExpression(EvalInfo &Info, SourceLocation Loc,
   return true;
 }
 
+/// Member pointers are constant expressions unless they point to a
+/// non-virtual dllimport member function.
+static bool CheckMemberPointerConstantExpression(EvalInfo &Info,
+                                                 SourceLocation Loc,
+                                                 QualType Type,
+                                                 const APValue &Value) {
+  const ValueDecl *Member = Value.getMemberPointerDecl();
+  const auto *FD = dyn_cast_or_null<CXXMethodDecl>(Member);
+  if (!FD)
+    return true;
+  return FD->isVirtual() || !FD->hasAttr<DLLImportAttr>();
+}
+
 /// Check that this core constant expression is of literal type, and if not,
 /// produce an appropriate diagnostic.
 static bool CheckLiteralType(EvalInfo &Info, const Expr *E,
@@ -1745,6 +1769,9 @@ static bool CheckConstantExpression(EvalInfo &Info, SourceLocation DiagLoc,
     LVal.setFrom(Info.Ctx, Value);
     return CheckLValueConstantExpression(Info, DiagLoc, Type, LVal);
   }
+
+  if (Value.isMemberPointer())
+    return CheckMemberPointerConstantExpression(Info, DiagLoc, Type, Value);
 
   // Everything else is fine.
   return true;
@@ -4416,8 +4443,14 @@ private:
   bool HandleConditionalOperator(const ConditionalOperator *E) {
     bool BoolResult;
     if (!EvaluateAsBooleanCondition(E->getCond(), BoolResult, Info)) {
-      if (Info.checkingPotentialConstantExpression() && Info.noteFailure())
+      if (Info.checkingPotentialConstantExpression() && Info.noteFailure()) {
         CheckPotentialConstantConditional(E);
+        return false;
+      }
+      if (Info.noteFailure()) {
+        StmtVisitorTy::Visit(E->getTrueExpr());
+        StmtVisitorTy::Visit(E->getFalseExpr());
+      }
       return false;
     }
 
@@ -5238,14 +5271,19 @@ bool LValueExprEvaluator::VisitArraySubscriptExpr(const ArraySubscriptExpr *E) {
   if (E->getBase()->getType()->isVectorType())
     return Error(E);
 
-  if (!evaluatePointer(E->getBase(), Result))
-    return false;
+  bool Success = true;
+  if (!evaluatePointer(E->getBase(), Result)) {
+    if (!Info.noteFailure())
+      return false;
+    Success = false;
+  }
 
   APSInt Index;
   if (!EvaluateInteger(E->getIdx(), Index, Info))
     return false;
 
-  return HandleLValueArrayAdjustment(Info, E, Result, E->getType(), Index);
+  return Success &&
+         HandleLValueArrayAdjustment(Info, E, Result, E->getType(), Index);
 }
 
 bool LValueExprEvaluator::VisitUnaryDeref(const UnaryOperator *E) {
@@ -5458,8 +5496,8 @@ public:
     return true;
   }
   bool ZeroInitialization(const Expr *E) {
-    auto Offset = Info.Ctx.getTargetNullPointerValue(E->getType());
-    Result.set((Expr*)nullptr, 0, false, true, Offset);
+    auto TargetVal = Info.Ctx.getTargetNullPointerValue(E->getType());
+    Result.setNull(E->getType(), TargetVal);
     return true;
   }
 
@@ -5468,8 +5506,11 @@ public:
   bool VisitUnaryAddrOf(const UnaryOperator *E);
   bool VisitObjCStringLiteral(const ObjCStringLiteral *E)
       { return Success(E); }
-  bool VisitObjCBoxedExpr(const ObjCBoxedExpr *E)
-      { return Success(E); }
+  bool VisitObjCBoxedExpr(const ObjCBoxedExpr *E) {
+    if (Info.noteFailure())
+      EvaluateIgnoredValue(Info, E->getSubExpr());
+    return Error(E);
+  }
   bool VisitAddrLabelExpr(const AddrLabelExpr *E)
       { return Success(E); }
   bool VisitCallExpr(const CallExpr *E);
@@ -5677,6 +5718,8 @@ static CharUnits GetAlignOfType(EvalInfo &Info, QualType T) {
     T = Ref->getPointeeType();
 
   // __alignof is defined to return the preferred alignment.
+  if (T.getQualifiers().hasUnaligned())
+    return CharUnits::One();
   return Info.Ctx.toCharUnitsFromBits(
     Info.Ctx.getPreferredTypeAlign(T.getTypePtr()));
 }
@@ -8070,7 +8113,8 @@ bool DataRecursiveIntBinOpEvaluator::
   return true;
 }
 
-static void addOrSubLValueAsInteger(APValue &LVal, APSInt Index, bool IsSub) {
+static void addOrSubLValueAsInteger(APValue &LVal, const APSInt &Index,
+                                    bool IsSub) {
   // Compute the new offset in the appropriate width, wrapping at 64 bits.
   // FIXME: When compiling for a 32-bit target, we should use 32-bit
   // offsets.
@@ -9480,7 +9524,7 @@ bool ComplexExprEvaluator::VisitBinaryOperator(const BinaryOperator *E) {
   case BO_Mul:
     if (Result.isComplexFloat()) {
       // This is an implementation of complex multiplication according to the
-      // constraints laid out in C11 Annex G. The implemantion uses the
+      // constraints laid out in C11 Annex G. The implemention uses the
       // following naming scheme:
       //   (a + ib) * (c + id)
       ComplexValue LHS = Result;
@@ -9561,7 +9605,7 @@ bool ComplexExprEvaluator::VisitBinaryOperator(const BinaryOperator *E) {
   case BO_Div:
     if (Result.isComplexFloat()) {
       // This is an implementation of complex division according to the
-      // constraints laid out in C11 Annex G. The implemantion uses the
+      // constraints laid out in C11 Annex G. The implemention uses the
       // following naming scheme:
       //   (a + ib) / (c + id)
       ComplexValue LHS = Result;
@@ -10216,6 +10260,7 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
   case Expr::LambdaExprClass:
   case Expr::CXXFoldExprClass:
   case Expr::CoawaitExprClass:
+  case Expr::DependentCoawaitExprClass:
   case Expr::CoyieldExprClass:
     return ICEDiag(IK_NotICE, E->getLocStart());
 
@@ -10318,6 +10363,7 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
     }
 
     // OffsetOf falls through here.
+    LLVM_FALLTHROUGH;
   }
   case Expr::OffsetOfExprClass: {
     // Note that per C99, offsetof must be an ICE. And AFAIK, using
@@ -10420,6 +10466,7 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
       return Worst(LHSResult, RHSResult);
     }
     }
+    LLVM_FALLTHROUGH;
   }
   case Expr::ImplicitCastExprClass:
   case Expr::CStyleCastExprClass:

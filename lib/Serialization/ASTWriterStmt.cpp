@@ -315,6 +315,11 @@ void ASTStmtWriter::VisitCoawaitExpr(CoawaitExpr *S) {
   llvm_unreachable("unimplemented");
 }
 
+void ASTStmtWriter::VisitDependentCoawaitExpr(DependentCoawaitExpr *S) {
+  // FIXME: Implement coroutine serialization.
+  llvm_unreachable("unimplemented");
+}
+
 void ASTStmtWriter::VisitCoyieldExpr(CoyieldExpr *S) {
   // FIXME: Implement coroutine serialization.
   llvm_unreachable("unimplemented");
@@ -645,7 +650,7 @@ void ASTStmtWriter::VisitBinaryOperator(BinaryOperator *E) {
   Record.AddStmt(E->getRHS());
   Record.push_back(E->getOpcode()); // FIXME: stable encoding
   Record.AddSourceLocation(E->getOperatorLoc());
-  Record.push_back(E->isFPContractable());
+  Record.push_back(E->getFPFeatures().getInt());
   Code = serialization::EXPR_BINARY_OPERATOR;
 }
 
@@ -1213,7 +1218,7 @@ void ASTStmtWriter::VisitCXXOperatorCallExpr(CXXOperatorCallExpr *E) {
   VisitCallExpr(E);
   Record.push_back(E->getOperator());
   Record.AddSourceRange(E->Range);
-  Record.push_back(E->isFPContractable());
+  Record.push_back(E->getFPFeatures().getInt());
   Code = serialization::EXPR_CXX_OPERATOR_CALL;
 }
 
@@ -1958,6 +1963,25 @@ void OMPClauseWriter::VisitOMPReductionClause(OMPReductionClause *C) {
     Record.AddStmt(E);
 }
 
+void OMPClauseWriter::VisitOMPTaskReductionClause(OMPTaskReductionClause *C) {
+  Record.push_back(C->varlist_size());
+  VisitOMPClauseWithPostUpdate(C);
+  Record.AddSourceLocation(C->getLParenLoc());
+  Record.AddSourceLocation(C->getColonLoc());
+  Record.AddNestedNameSpecifierLoc(C->getQualifierLoc());
+  Record.AddDeclarationNameInfo(C->getNameInfo());
+  for (auto *VE : C->varlists())
+    Record.AddStmt(VE);
+  for (auto *VE : C->privates())
+    Record.AddStmt(VE);
+  for (auto *E : C->lhs_exprs())
+    Record.AddStmt(E);
+  for (auto *E : C->rhs_exprs())
+    Record.AddStmt(E);
+  for (auto *E : C->reduction_ops())
+    Record.AddStmt(E);
+}
+
 void OMPClauseWriter::VisitOMPLinearClause(OMPLinearClause *C) {
   Record.push_back(C->varlist_size());
   VisitOMPClauseWithPostUpdate(C);
@@ -2243,6 +2267,13 @@ void ASTStmtWriter::VisitOMPLoopDirective(OMPLoopDirective *D) {
     Record.AddStmt(D->getPrevUpperBoundVariable());
     Record.AddStmt(D->getDistInc());
     Record.AddStmt(D->getPrevEnsureUpperBound());
+    Record.AddStmt(D->getCombinedLowerBoundVariable());
+    Record.AddStmt(D->getCombinedUpperBoundVariable());
+    Record.AddStmt(D->getCombinedEnsureUpperBound());
+    Record.AddStmt(D->getCombinedInit());
+    Record.AddStmt(D->getCombinedCond());
+    Record.AddStmt(D->getCombinedNextLowerBound());
+    Record.AddStmt(D->getCombinedNextUpperBound());
   }
   for (auto I : D->counters()) {
     Record.AddStmt(I);
@@ -2428,6 +2459,7 @@ void ASTStmtWriter::VisitOMPTaskwaitDirective(OMPTaskwaitDirective *D) {
 
 void ASTStmtWriter::VisitOMPTaskgroupDirective(OMPTaskgroupDirective *D) {
   VisitStmt(D);
+  Record.push_back(D->getNumClauses());
   VisitOMPExecutableDirective(D);
   Code = serialization::STMT_OMP_TASKGROUP_DIRECTIVE;
 }

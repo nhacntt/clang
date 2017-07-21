@@ -19,8 +19,8 @@
 #include "CGVTables.h"
 #include "CodeGenModule.h"
 #include "CodeGenTypes.h"
-#include "ConstantBuilder.h"
 #include "TargetInfo.h"
+#include "clang/CodeGen/ConstantInitBuilder.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/StmtCXX.h"
@@ -1413,11 +1413,10 @@ void MicrosoftCXXABI::addImplicitStructorParams(CodeGenFunction &CGF,
   const CXXMethodDecl *MD = cast<CXXMethodDecl>(CGF.CurGD.getDecl());
   assert(isa<CXXConstructorDecl>(MD) || isa<CXXDestructorDecl>(MD));
   if (isa<CXXConstructorDecl>(MD) && MD->getParent()->getNumVBases()) {
-    ImplicitParamDecl *IsMostDerived
-      = ImplicitParamDecl::Create(Context, nullptr,
-                                  CGF.CurGD.getDecl()->getLocation(),
-                                  &Context.Idents.get("is_most_derived"),
-                                  Context.IntTy);
+    auto *IsMostDerived = ImplicitParamDecl::Create(
+        Context, /*DC=*/nullptr, CGF.CurGD.getDecl()->getLocation(),
+        &Context.Idents.get("is_most_derived"), Context.IntTy,
+        ImplicitParamDecl::Other);
     // The 'most_derived' parameter goes second if the ctor is variadic and last
     // if it's not.  Dtors can't be variadic.
     const FunctionProtoType *FPT = MD->getType()->castAs<FunctionProtoType>();
@@ -1427,11 +1426,10 @@ void MicrosoftCXXABI::addImplicitStructorParams(CodeGenFunction &CGF,
       Params.push_back(IsMostDerived);
     getStructorImplicitParamDecl(CGF) = IsMostDerived;
   } else if (isDeletingDtor(CGF.CurGD)) {
-    ImplicitParamDecl *ShouldDelete
-      = ImplicitParamDecl::Create(Context, nullptr,
-                                  CGF.CurGD.getDecl()->getLocation(),
-                                  &Context.Idents.get("should_call_delete"),
-                                  Context.IntTy);
+    auto *ShouldDelete = ImplicitParamDecl::Create(
+        Context, /*DC=*/nullptr, CGF.CurGD.getDecl()->getLocation(),
+        &Context.Idents.get("should_call_delete"), Context.IntTy,
+        ImplicitParamDecl::Other);
     Params.push_back(ShouldDelete);
     getStructorImplicitParamDecl(CGF) = ShouldDelete;
   }
@@ -2210,9 +2208,8 @@ static void emitGlobalDtorWithTLRegDtor(CodeGenFunction &CGF, const VarDecl &VD,
   llvm::FunctionType *TLRegDtorTy = llvm::FunctionType::get(
       CGF.IntTy, DtorStub->getType(), /*IsVarArg=*/false);
 
-  llvm::Constant *TLRegDtor =
-      CGF.CGM.CreateRuntimeFunction(TLRegDtorTy, "__tlregdtor",
-                                    llvm::AttributeSet(), /*Local=*/true);
+  llvm::Constant *TLRegDtor = CGF.CGM.CreateRuntimeFunction(
+      TLRegDtorTy, "__tlregdtor", llvm::AttributeList(), /*Local=*/true);
   if (llvm::Function *TLRegDtorFn = dyn_cast<llvm::Function>(TLRegDtor))
     TLRegDtorFn->setDoesNotThrow();
 
@@ -2308,9 +2305,9 @@ static llvm::Constant *getInitThreadHeaderFn(CodeGenModule &CGM) {
                               CGM.IntTy->getPointerTo(), /*isVarArg=*/false);
   return CGM.CreateRuntimeFunction(
       FTy, "_Init_thread_header",
-      llvm::AttributeSet::get(CGM.getLLVMContext(),
-                              llvm::AttributeSet::FunctionIndex,
-                              llvm::Attribute::NoUnwind),
+      llvm::AttributeList::get(CGM.getLLVMContext(),
+                               llvm::AttributeList::FunctionIndex,
+                               llvm::Attribute::NoUnwind),
       /*Local=*/true);
 }
 
@@ -2320,9 +2317,9 @@ static llvm::Constant *getInitThreadFooterFn(CodeGenModule &CGM) {
                               CGM.IntTy->getPointerTo(), /*isVarArg=*/false);
   return CGM.CreateRuntimeFunction(
       FTy, "_Init_thread_footer",
-      llvm::AttributeSet::get(CGM.getLLVMContext(),
-                              llvm::AttributeSet::FunctionIndex,
-                              llvm::Attribute::NoUnwind),
+      llvm::AttributeList::get(CGM.getLLVMContext(),
+                               llvm::AttributeList::FunctionIndex,
+                               llvm::Attribute::NoUnwind),
       /*Local=*/true);
 }
 
@@ -2332,9 +2329,9 @@ static llvm::Constant *getInitThreadAbortFn(CodeGenModule &CGM) {
                               CGM.IntTy->getPointerTo(), /*isVarArg=*/false);
   return CGM.CreateRuntimeFunction(
       FTy, "_Init_thread_abort",
-      llvm::AttributeSet::get(CGM.getLLVMContext(),
-                              llvm::AttributeSet::FunctionIndex,
-                              llvm::Attribute::NoUnwind),
+      llvm::AttributeList::get(CGM.getLLVMContext(),
+                               llvm::AttributeList::FunctionIndex,
+                               llvm::Attribute::NoUnwind),
       /*Local=*/true);
 }
 
@@ -3428,6 +3425,8 @@ static llvm::GlobalValue::LinkageTypes getLinkageForRTTI(QualType Ty) {
     return llvm::GlobalValue::InternalLinkage;
 
   case VisibleNoLinkage:
+  case ModuleInternalLinkage:
+  case ModuleLinkage:
   case ExternalLinkage:
     return llvm::GlobalValue::LinkOnceODRLinkage;
   }
@@ -3720,7 +3719,7 @@ CatchTypeInfo
 MicrosoftCXXABI::getAddrOfCXXCatchHandlerType(QualType Type,
                                               QualType CatchHandlerType) {
   // TypeDescriptors for exceptions never have qualified pointer types,
-  // qualifiers are stored seperately in order to support qualification
+  // qualifiers are stored separately in order to support qualification
   // conversions.
   bool IsConst, IsVolatile, IsUnaligned;
   Type =
@@ -3756,6 +3755,9 @@ llvm::Constant *MicrosoftCXXABI::getAddrOfRTTIDescriptor(QualType Type) {
   // Check to see if we've already declared this TypeDescriptor.
   if (llvm::GlobalVariable *GV = CGM.getModule().getNamedGlobal(MangledName))
     return llvm::ConstantExpr::getBitCast(GV, CGM.Int8PtrTy);
+
+  // Note for the future: If we would ever like to do deferred emission of
+  // RTTI, check if emitting vtables opportunistically need any adjustment.
 
   // Compute the fields for the TypeDescriptor.
   SmallString<256> TypeInfoString;
@@ -3873,18 +3875,21 @@ MicrosoftCXXABI::getAddrOfCXXCtorClosure(const CXXConstructorDecl *CD,
   // Following the 'this' pointer is a reference to the source object that we
   // are copying from.
   ImplicitParamDecl SrcParam(
-      getContext(), nullptr, SourceLocation(), &getContext().Idents.get("src"),
+      getContext(), /*DC=*/nullptr, SourceLocation(),
+      &getContext().Idents.get("src"),
       getContext().getLValueReferenceType(RecordTy,
-                                          /*SpelledAsLValue=*/true));
+                                          /*SpelledAsLValue=*/true),
+      ImplicitParamDecl::Other);
   if (IsCopy)
     FunctionArgs.push_back(&SrcParam);
 
   // Constructors for classes which utilize virtual bases have an additional
   // parameter which indicates whether or not it is being delegated to by a more
   // derived constructor.
-  ImplicitParamDecl IsMostDerived(getContext(), nullptr, SourceLocation(),
+  ImplicitParamDecl IsMostDerived(getContext(), /*DC=*/nullptr,
+                                  SourceLocation(),
                                   &getContext().Idents.get("is_most_derived"),
-                                  getContext().IntTy);
+                                  getContext().IntTy, ImplicitParamDecl::Other);
   // Only add the parameter to the list if thie class has virtual bases.
   if (RD->getNumVBases() > 0)
     FunctionArgs.push_back(&IsMostDerived);
@@ -3934,7 +3939,7 @@ MicrosoftCXXABI::getAddrOfCXXCtorClosure(const CXXConstructorDecl *CD,
     CGM.getAddrOfCXXStructor(CD, StructorType::Complete);
   CGCallee Callee = CGCallee::forDirect(CalleePtr, CD);
   const CGFunctionInfo &CalleeInfo = CGM.getTypes().arrangeCXXConstructorCall(
-      Args, CD, Ctor_Complete, ExtraArgs.Prefix + ExtraArgs.Suffix);
+      Args, CD, Ctor_Complete, ExtraArgs.Prefix, ExtraArgs.Suffix);
   CGF.EmitCall(CalleeInfo, Callee, ReturnValueSlot(), Args);
 
   Cleanups.ForceCleanup();

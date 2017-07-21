@@ -128,7 +128,7 @@ namespace {
     }
 
     void VisitType(QualType T) override {
-      if (Canonical)
+      if (Canonical && !T.isNull())
         T = Context.getCanonicalType(T);
 
       ID.AddPointer(T.getAsOpaquePtr());
@@ -527,6 +527,30 @@ void OMPClauseProfiler::VisitOMPSharedClause(const OMPSharedClause *C) {
 }
 void OMPClauseProfiler::VisitOMPReductionClause(
                                          const OMPReductionClause *C) {
+  Profiler->VisitNestedNameSpecifier(
+      C->getQualifierLoc().getNestedNameSpecifier());
+  Profiler->VisitName(C->getNameInfo().getName());
+  VisitOMPClauseList(C);
+  VistOMPClauseWithPostUpdate(C);
+  for (auto *E : C->privates()) {
+    if (E)
+      Profiler->VisitStmt(E);
+  }
+  for (auto *E : C->lhs_exprs()) {
+    if (E)
+      Profiler->VisitStmt(E);
+  }
+  for (auto *E : C->rhs_exprs()) {
+    if (E)
+      Profiler->VisitStmt(E);
+  }
+  for (auto *E : C->reduction_ops()) {
+    if (E)
+      Profiler->VisitStmt(E);
+  }
+}
+void OMPClauseProfiler::VisitOMPTaskReductionClause(
+    const OMPTaskReductionClause *C) {
   Profiler->VisitNestedNameSpecifier(
       C->getQualifierLoc().getNestedNameSpecifier());
   Profiler->VisitName(C->getNameInfo().getName());
@@ -1722,6 +1746,10 @@ void StmtProfiler::VisitCoreturnStmt(const CoreturnStmt *S) {
 }
 
 void StmtProfiler::VisitCoawaitExpr(const CoawaitExpr *S) {
+  VisitExpr(S);
+}
+
+void StmtProfiler::VisitDependentCoawaitExpr(const DependentCoawaitExpr *S) {
   VisitExpr(S);
 }
 

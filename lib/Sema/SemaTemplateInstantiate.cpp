@@ -196,6 +196,8 @@ bool Sema::CodeSynthesisContext::isInstantiationRecord() const {
     return true;
 
   case DefaultTemplateArgumentChecking:
+  case DeclaringSpecialMember:
+  case DefiningSynthesizedFunction:
     return false;
   }
 
@@ -207,8 +209,7 @@ Sema::InstantiatingTemplate::InstantiatingTemplate(
     SourceLocation PointOfInstantiation, SourceRange InstantiationRange,
     Decl *Entity, NamedDecl *Template, ArrayRef<TemplateArgument> TemplateArgs,
     sema::TemplateDeductionInfo *DeductionInfo)
-    : SemaRef(SemaRef), SavedInNonInstantiationSFINAEContext(
-                            SemaRef.InNonInstantiationSFINAEContext) {
+    : SemaRef(SemaRef) {
   // Don't allow further instantiation if a fatal error and an uncompilable
   // error have occurred. Any diagnostics we might have raised will not be
   // visible, and we do not need to construct a correct AST.
@@ -228,14 +229,12 @@ Sema::InstantiatingTemplate::InstantiatingTemplate(
     Inst.NumTemplateArgs = TemplateArgs.size();
     Inst.DeductionInfo = DeductionInfo;
     Inst.InstantiationRange = InstantiationRange;
+    SemaRef.pushCodeSynthesisContext(Inst);
+
     AlreadyInstantiating =
         !SemaRef.InstantiatingSpecializations
              .insert(std::make_pair(Inst.Entity->getCanonicalDecl(), Inst.Kind))
              .second;
-    SemaRef.InNonInstantiationSFINAEContext = false;
-    SemaRef.CodeSynthesisContexts.push_back(Inst);
-    if (!Inst.isInstantiationRecord())
-      ++SemaRef.NonInstantiationEntries;
   }
 }
 
@@ -348,38 +347,55 @@ Sema::InstantiatingTemplate::InstantiatingTemplate(
           PointOfInstantiation, InstantiationRange, Param, Template,
           TemplateArgs) {}
 
+void Sema::pushCodeSynthesisContext(CodeSynthesisContext Ctx) {
+  Ctx.SavedInNonInstantiationSFINAEContext = InNonInstantiationSFINAEContext;
+  InNonInstantiationSFINAEContext = false;
+
+  CodeSynthesisContexts.push_back(Ctx);
+
+  if (!Ctx.isInstantiationRecord())
+    ++NonInstantiationEntries;
+}
+
+void Sema::popCodeSynthesisContext() {
+  auto &Active = CodeSynthesisContexts.back();
+  if (!Active.isInstantiationRecord()) {
+    assert(NonInstantiationEntries > 0);
+    --NonInstantiationEntries;
+  }
+
+  InNonInstantiationSFINAEContext = Active.SavedInNonInstantiationSFINAEContext;
+
+  // Name lookup no longer looks in this template's defining module.
+  assert(CodeSynthesisContexts.size() >=
+             CodeSynthesisContextLookupModules.size() &&
+         "forgot to remove a lookup module for a template instantiation");
+  if (CodeSynthesisContexts.size() ==
+      CodeSynthesisContextLookupModules.size()) {
+    if (Module *M = CodeSynthesisContextLookupModules.back())
+      LookupModulesCache.erase(M);
+    CodeSynthesisContextLookupModules.pop_back();
+  }
+
+  // If we've left the code synthesis context for the current context stack,
+  // stop remembering that we've emitted that stack.
+  if (CodeSynthesisContexts.size() ==
+      LastEmittedCodeSynthesisContextDepth)
+    LastEmittedCodeSynthesisContextDepth = 0;
+
+  CodeSynthesisContexts.pop_back();
+}
+
 void Sema::InstantiatingTemplate::Clear() {
   if (!Invalid) {
-    auto &Active = SemaRef.CodeSynthesisContexts.back();
-    if (!Active.isInstantiationRecord()) {
-      assert(SemaRef.NonInstantiationEntries > 0);
-      --SemaRef.NonInstantiationEntries;
-    }
-    SemaRef.InNonInstantiationSFINAEContext
-      = SavedInNonInstantiationSFINAEContext;
-
-    // Name lookup no longer looks in this template's defining module.
-    assert(SemaRef.CodeSynthesisContexts.size() >=
-           SemaRef.CodeSynthesisContextLookupModules.size() &&
-           "forgot to remove a lookup module for a template instantiation");
-    if (SemaRef.CodeSynthesisContexts.size() ==
-        SemaRef.CodeSynthesisContextLookupModules.size()) {
-      if (Module *M = SemaRef.CodeSynthesisContextLookupModules.back())
-        SemaRef.LookupModulesCache.erase(M);
-      SemaRef.CodeSynthesisContextLookupModules.pop_back();
-    }
-
-    // If we've left the code synthesis context for the current context stack,
-    // stop remembering that we've emitted that stack.
-    if (SemaRef.CodeSynthesisContexts.size() ==
-        SemaRef.LastEmittedCodeSynthesisContextDepth)
-      SemaRef.LastEmittedCodeSynthesisContextDepth = 0;
-
-    if (!AlreadyInstantiating)
+    if (!AlreadyInstantiating) {
+      auto &Active = SemaRef.CodeSynthesisContexts.back();
       SemaRef.InstantiatingSpecializations.erase(
           std::make_pair(Active.Entity, Active.Kind));
+    }
 
-    SemaRef.CodeSynthesisContexts.pop_back();
+    SemaRef.popCodeSynthesisContext();
+
     Invalid = true;
   }
 }
@@ -603,6 +619,23 @@ void Sema::PrintInstantiationStack() {
         << cast<FunctionDecl>(Active->Entity)
         << Active->InstantiationRange;
       break;
+
+    case CodeSynthesisContext::DeclaringSpecialMember:
+      Diags.Report(Active->PointOfInstantiation,
+                   diag::note_in_declaration_of_implicit_special_member)
+        << cast<CXXRecordDecl>(Active->Entity) << Active->SpecialMember;
+      break;
+
+    case CodeSynthesisContext::DefiningSynthesizedFunction:
+      // FIXME: For synthesized members other than special members, produce a note.
+      auto *MD = dyn_cast<CXXMethodDecl>(Active->Entity);
+      auto CSM = MD ? getSpecialMember(MD) : CXXInvalid;
+      if (CSM != CXXInvalid) {
+        Diags.Report(Active->PointOfInstantiation,
+                     diag::note_member_synthesized_at)
+          << CSM << Context.getTagDeclType(MD->getParent());
+      }
+      break;
     }
   }
 }
@@ -617,7 +650,7 @@ Optional<TemplateDeductionInfo *> Sema::isSFINAEContext() const {
        Active != ActiveEnd;
        ++Active) 
   {
-    switch(Active->Kind) {
+    switch (Active->Kind) {
     case CodeSynthesisContext::TemplateInstantiation:
       // An instantiation of an alias template may or may not be a SFINAE
       // context, depending on what else is on the stack.
@@ -643,7 +676,18 @@ Optional<TemplateDeductionInfo *> Sema::isSFINAEContext() const {
       // or deduced template arguments, so SFINAE applies.
       assert(Active->DeductionInfo && "Missing deduction info pointer");
       return Active->DeductionInfo;
+
+    case CodeSynthesisContext::DeclaringSpecialMember:
+    case CodeSynthesisContext::DefiningSynthesizedFunction:
+      // This happens in a context unrelated to template instantiation, so
+      // there is no SFINAE.
+      return None;
     }
+
+    // The inner context was transparent for SFINAE. If it occurred within a
+    // non-instantiation SFINAE context, then SFINAE applies.
+    if (Active->SavedInNonInstantiationSFINAEContext)
+      return Optional<TemplateDeductionInfo *>(nullptr);
   }
 
   return None;
@@ -1648,20 +1692,26 @@ TypeSourceInfo *Sema::SubstFunctionDeclType(TypeSourceInfo *T,
   return TLB.getTypeSourceInfo(Context, Result);
 }
 
+bool Sema::SubstExceptionSpec(SourceLocation Loc,
+                              FunctionProtoType::ExceptionSpecInfo &ESI,
+                              SmallVectorImpl<QualType> &ExceptionStorage,
+                              const MultiLevelTemplateArgumentList &Args) {
+  assert(ESI.Type != EST_Uninstantiated);
+
+  bool Changed = false;
+  TemplateInstantiator Instantiator(*this, Args, Loc, DeclarationName());
+  return Instantiator.TransformExceptionSpec(Loc, ESI, ExceptionStorage,
+                                             Changed);
+}
+
 void Sema::SubstExceptionSpec(FunctionDecl *New, const FunctionProtoType *Proto,
                               const MultiLevelTemplateArgumentList &Args) {
   FunctionProtoType::ExceptionSpecInfo ESI =
       Proto->getExtProtoInfo().ExceptionSpec;
-  assert(ESI.Type != EST_Uninstantiated);
-
-  TemplateInstantiator Instantiator(*this, Args, New->getLocation(),
-                                    New->getDeclName());
 
   SmallVector<QualType, 4> ExceptionStorage;
-  bool Changed = false;
-  if (Instantiator.TransformExceptionSpec(
-          New->getTypeSourceInfo()->getTypeLoc().getLocEnd(), ESI,
-          ExceptionStorage, Changed))
+  if (SubstExceptionSpec(New->getTypeSourceInfo()->getTypeLoc().getLocEnd(),
+                         ESI, ExceptionStorage, Args))
     // On error, recover by dropping the exception specification.
     ESI.Type = EST_None;
 
@@ -1908,6 +1958,9 @@ namespace clang {
   namespace sema {
     Attr *instantiateTemplateAttribute(const Attr *At, ASTContext &C, Sema &S,
                             const MultiLevelTemplateArgumentList &TemplateArgs);
+    Attr *instantiateTemplateAttributeForDecl(
+        const Attr *At, ASTContext &C, Sema &S,
+        const MultiLevelTemplateArgumentList &TemplateArgs);
   }
 }
 
@@ -1968,8 +2021,8 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
   // Enter the scope of this instantiation. We don't use
   // PushDeclContext because we don't have a scope.
   ContextRAII SavedContext(*this, Instantiation);
-  EnterExpressionEvaluationContext EvalContext(*this, 
-                                               Sema::PotentiallyEvaluated);
+  EnterExpressionEvaluationContext EvalContext(
+      *this, Sema::ExpressionEvaluationContext::PotentiallyEvaluated);
 
   // If this is an instantiation of a local class, merge this local
   // instantiation scope with the enclosing scope. Otherwise, every
@@ -1992,7 +2045,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
 
   // The instantiation is visible here, even if it was first declared in an
   // unimported module.
-  Instantiation->setHidden(false);
+  Instantiation->setVisibleDespiteOwningModule();
 
   // FIXME: This loses the as-written tag kind for an explicit instantiation.
   Instantiation->setTagKind(Pattern->getTagKind());
@@ -2194,13 +2247,13 @@ bool Sema::InstantiateEnum(SourceLocation PointOfInstantiation,
 
   // The instantiation is visible here, even if it was first declared in an
   // unimported module.
-  Instantiation->setHidden(false);
+  Instantiation->setVisibleDespiteOwningModule();
 
   // Enter the scope of this instantiation. We don't use
   // PushDeclContext because we don't have a scope.
   ContextRAII SavedContext(*this, Instantiation);
-  EnterExpressionEvaluationContext EvalContext(*this,
-                                               Sema::PotentiallyEvaluated);
+  EnterExpressionEvaluationContext EvalContext(
+      *this, Sema::ExpressionEvaluationContext::PotentiallyEvaluated);
 
   LocalInstantiationScope Scope(*this, /*MergeWithParentScope*/true);
 
@@ -2271,8 +2324,8 @@ bool Sema::InstantiateInClassInitializer(
   // Enter the scope of this instantiation. We don't use PushDeclContext because
   // we don't have a scope.
   ContextRAII SavedContext(*this, Instantiation->getParent());
-  EnterExpressionEvaluationContext EvalContext(*this,
-                                               Sema::PotentiallyEvaluated);
+  EnterExpressionEvaluationContext EvalContext(
+      *this, Sema::ExpressionEvaluationContext::PotentiallyEvaluated);
 
   LocalInstantiationScope Scope(*this, true);
 
@@ -2301,6 +2354,25 @@ namespace {
     ClassTemplatePartialSpecializationDecl *Partial;
     TemplateArgumentList *Args;
   };
+}
+
+bool Sema::usesPartialOrExplicitSpecialization(
+    SourceLocation Loc, ClassTemplateSpecializationDecl *ClassTemplateSpec) {
+  if (ClassTemplateSpec->getTemplateSpecializationKind() ==
+      TSK_ExplicitSpecialization)
+    return true;
+
+  SmallVector<ClassTemplatePartialSpecializationDecl *, 4> PartialSpecs;
+  ClassTemplateSpec->getSpecializedTemplate()
+                   ->getPartialSpecializations(PartialSpecs);
+  for (unsigned I = 0, N = PartialSpecs.size(); I != N; ++I) {
+    TemplateDeductionInfo Info(Loc);
+    if (!DeduceTemplateArguments(PartialSpecs[I],
+                                 ClassTemplateSpec->getTemplateArgs(), Info))
+      return true;
+  }
+
+  return false;
 }
 
 /// Get the instantiation pattern to use to instantiate the definition of a
@@ -2571,10 +2643,11 @@ Sema::InstantiateClassMembers(SourceLocation PointOfInstantiation,
                                                 == TSK_ExplicitSpecialization)
         continue;
 
-      if (Context.getTargetInfo().getCXXABI().isMicrosoft() &&
+      if ((Context.getTargetInfo().getCXXABI().isMicrosoft() ||
+           Context.getTargetInfo().getTriple().isWindowsItaniumEnvironment()) &&
           TSK == TSK_ExplicitInstantiationDeclaration) {
-        // In MSVC mode, explicit instantiation decl of the outer class doesn't
-        // affect the inner class.
+        // In MSVC and Windows Itanium mode, explicit instantiation decl of the
+        // outer class doesn't affect the inner class.
         continue;
       }
 

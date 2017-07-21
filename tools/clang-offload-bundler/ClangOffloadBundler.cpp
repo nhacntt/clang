@@ -412,7 +412,7 @@ class ObjectFileHandler final : public FileHandler {
   /// read from the buffers.
   unsigned NumberOfProcessedInputs = 0;
 
-  /// LLVM context used to to create the auxiliar modules.
+  /// LLVM context used to to create the auxiliary modules.
   LLVMContext VMContext;
 
   /// LLVM module used to create an object with all the bundle
@@ -915,8 +915,7 @@ static bool UnbundleFiles() {
   return false;
 }
 
-static void PrintVersion() {
-  raw_ostream &OS = outs();
+static void PrintVersion(raw_ostream &OS) {
   OS << clang::getClangToolFullVersion("clang-offload-bundler") << '\n';
 }
 

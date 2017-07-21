@@ -48,6 +48,14 @@ struct UnwrappedLine {
   bool InPPDirective;
 
   bool MustBeDeclaration;
+
+  /// \brief If this \c UnwrappedLine closes a block in a sequence of lines,
+  /// \c MatchingOpeningBlockLineIndex stores the index of the corresponding
+  /// opening line. Otherwise, \c MatchingOpeningBlockLineIndex must be
+  /// \c kInvalidIndex.
+  size_t MatchingOpeningBlockLineIndex;
+
+  static const size_t kInvalidIndex = -1;
 };
 
 class UnwrappedLineConsumer {
@@ -85,7 +93,8 @@ private:
   void readTokenWithJavaScriptASI();
   void parseStructuralElement();
   bool tryToParseBracedList();
-  bool parseBracedList(bool ContinueOnSemicolons = false);
+  bool parseBracedList(bool ContinueOnSemicolons = false,
+                       tok::TokenKind ClosingBraceKind = tok::r_brace);
   void parseParens();
   void parseSquare();
   void parseIfThenElse();
@@ -234,8 +243,8 @@ struct UnwrappedLineNode {
   SmallVector<UnwrappedLine, 0> Children;
 };
 
-inline UnwrappedLine::UnwrappedLine()
-    : Level(0), InPPDirective(false), MustBeDeclaration(false) {}
+inline UnwrappedLine::UnwrappedLine() : Level(0), InPPDirective(false),
+  MustBeDeclaration(false), MatchingOpeningBlockLineIndex(kInvalidIndex) {}
 
 } // end namespace format
 } // end namespace clang
