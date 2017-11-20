@@ -6,22 +6,18 @@
 #include <clang/AST/RecursiveASTVisitor.h>
 #include <clang/AST/Mangle.h>
 
-//#include "clang/Driver/Options.h"
-//#include "clang/Frontend/ASTConsumers.h"
-
-#include "clang/Frontend/CompilerInstance.h"
+#include <clang/Frontend/CompilerInstance.h>
 #include <clang/Frontend/FrontendActions.h>
-//#include "clang/Rewrite/Core/Rewriter.h"
 #include <clang/Tooling/CommonOptionsParser.h>
 #include <clang/Tooling/Tooling.h>
-//#include <llvm/Support/YAMLTraits.h>
+#include <llvm/Analysis/DeclarationAnalysis.h>
 
 
 using namespace llvm;
 using namespace clang;  
 using namespace clang::tooling;
 
-
+//namespace{
 
 /*
 Command line options
@@ -108,7 +104,6 @@ class FindFuncDeclCallAction : public clang::ASTFrontendAction {
 
 };
 
-//}// namespace
 
 /*
 main
@@ -123,7 +118,7 @@ int main(int argc, const char **argv) {
 	ClangTool Tool(OptionsParser.getCompilations(), OptionsParser.getSourcePathList());
 	std::unique_ptr<FrontendActionFactory> FrontendFactory = newFrontendActionFactory<FindFuncDeclCallAction>();
 	int result = Tool.run(FrontendFactory.get());
-
+/*
 	if (OutputFilename != "") {
 		auto F=FuncDeclList::fromYAML(OutputFilename);
 		if (std::error_code ec = F.getError()) {
@@ -133,6 +128,8 @@ int main(int argc, const char **argv) {
 		FuncDeclList FL=F.get();
 		FL.toYAML(outs());
     }
-
+*/
 	return result;
 }
+
+
